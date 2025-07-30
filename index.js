@@ -6,7 +6,15 @@ const dotenv = require('dotenv').config();
 const port = 5000;
 
 // middleware 
-app.use(cors());
+app.use(cors({
+    origin:
+        [
+            'https://travling-clint-site.vercel.app',
+            'http://localhost:5173'
+        ]
+
+    //   credentials: true // optional: for cookies, authorization headers, etc.
+}));
 app.use(express.json());
 
 // MongoDB URI
