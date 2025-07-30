@@ -1,21 +1,18 @@
-const { MongoClient, ServerApiVersion } = require('mongodb');
-const express = require('express')
-const app = express()
-const cors = require('cors')
-const dotenv = require('dotenv').config()
-const port = 5000
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const express = require('express');
+const app = express();
+const cors = require('cors');
+const dotenv = require('dotenv').config();
+const port = 5000;
 
 // middleware 
-app.use(cors())
-app.use(express.json())
+app.use(cors());
+app.use(express.json());
 
-
-// mongodb
-
-
+// MongoDB URI
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_USER_PASSWORD}@cluster0.jfgqsm5.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// MongoClient setup
 const client = new MongoClient(uri, {
     serverApi: {
         version: ServerApiVersion.v1,
@@ -26,43 +23,52 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
-
-        const userCollection = client.db('Travling-Hotel').collection('Favorite');
-        
-
-
-
-        // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
-        // Send a ping to confirm a successful connection
+        const userCollection = client.db('Travling-Hotel').collection('Favorite');
+
+        // ✅ POST route: Add to Favorite
+        app.post('/wishlist', async (req, res) => {
+            const favoriteItem = req.body;
+
+            if (!favoriteItem || !favoriteItem.id) {
+                return res.status(400).send({ message: "Invalid wishlist data" });
+            }
+
+            const result = await userCollection.insertOne(favoriteItem);
+            res.status(200).send(result);
+        });
+
+        // (Optional) GET route: Fetch all favorites
+        app.get('/wishlist', async (req, res) => {
+            const result = await userCollection.find().toArray();
+            res.send(result);
+        });
+
+        // delete wishlist
+        app.delete('/wishlist/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+            const result = await userCollection.deleteOne(query);
+            res.send(result);
+        });
+
+
+        // Test MongoDB connection
         await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
-    } finally {
-        // Ensures that the client will close when you finish/error
-        // await client.close();
+        console.log("✅ Connected to MongoDB!");
+
+    } catch (err) {
+        console.error("MongoDB connection error:", err);
     }
 }
 run().catch(console.dir);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Base route
 app.get('/', (req, res) => {
-    res.send('Hello World!')
-})
+    res.send('Hello World!');
+});
 
+// Start server
 app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`)
-})
+    console.log(`✅ Server running on port ${port}`);
+});
