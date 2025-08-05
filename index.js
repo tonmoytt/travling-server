@@ -45,6 +45,25 @@ async function run() {
             const result = await userCollection.insertOne(favoriteItem);
             res.status(200).send(result);
         });
+       // ✅ POST route: Add to wishlist-recommend
+app.post('/wishlist-recommend', async (req, res) => {
+    const item = req.body;
+
+    // Basic validation
+    if (!item || !item.hotelId || !item.name || !item.email) {
+        return res.status(400).send({ message: "Invalid wishlist data" });
+    }
+
+    // Optional: Check if already exists
+    const exists = await userCollection.findOne({ hotelId: item.hotelId, email: item.email });
+    if (exists) {
+        return res.status(200).send({ message: "Already in wishlist" });
+    }
+
+    const result = await userCollection.insertOne(item);
+    res.status(200).send(result);
+});
+
 
         // (Optional) GET route: Fetch all favorites
         app.get('/wishlist', async (req, res) => {
@@ -73,7 +92,7 @@ run().catch(console.dir);
 
 // Base route
 app.get('/', (req, res) => {
-    res.send('Hello World!');
+    res.send('Hello World i am from teavling warp!');
 });
 
 // Start server
