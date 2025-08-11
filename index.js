@@ -35,34 +35,62 @@ async function run() {
         const userCollection = client.db('Travling-Hotel').collection('Favorite');
 
         // ✅ POST route: Add to Favorite
-        app.post('/wishlist', async (req, res) => {
-            const favoriteItem = req.body;
+        // app.post('/wishlist', async (req, res) => {
+        //     const favoriteItem = req.body;
 
-            if (!favoriteItem || !favoriteItem.id) {
+        //     if (!favoriteItem || !favoriteItem.id) {
+        //         return res.status(400).send({ message: "Invalid wishlist data" });
+        //     }
+
+        //     const result = await userCollection.insertOne(favoriteItem);
+        //     res.status(200).send(result);
+        // });
+
+        app.post('/wishlist', async (req, res) => {
+  const favoriteItem = req.body;
+
+  if (!favoriteItem || !favoriteItem.id || !favoriteItem.email) {
+    return res.status(400).send({ message: "Invalid wishlist data" });
+  }
+
+  try {
+    // Check if the item is already in the wishlist for this user
+    const exists = await userCollection.findOne({
+      id: favoriteItem.id,
+      email: favoriteItem.email
+    });
+
+    if (exists) {
+      return res.status(400).send({ message: "Item already added to wishlist" });
+    }
+
+    // If not exists, insert the new item
+    const result = await userCollection.insertOne(favoriteItem);
+    res.status(200).send(result);
+  } catch (error) {
+    console.error('Wishlist insert error:', error);
+    res.status(500).send({ message: "Server error" });
+  }
+});
+
+        // ✅ POST route: Add to wishlist-recommend
+        app.post('/wishlist-recommend', async (req, res) => {
+            const item = req.body;
+
+            // Basic validation
+            if (!item || !item.hotelId || !item.name || !item.email) {
                 return res.status(400).send({ message: "Invalid wishlist data" });
             }
 
-            const result = await userCollection.insertOne(favoriteItem);
+            // Optional: Check if already exists
+            const exists = await userCollection.findOne({ hotelId: item.hotelId, email: item.email });
+            if (exists) {
+                return res.status(200).send({ message: "Already in wishlist" });
+            }
+
+            const result = await userCollection.insertOne(item);
             res.status(200).send(result);
         });
-       // ✅ POST route: Add to wishlist-recommend
-app.post('/wishlist-recommend', async (req, res) => {
-    const item = req.body;
-
-    // Basic validation
-    if (!item || !item.hotelId || !item.name || !item.email) {
-        return res.status(400).send({ message: "Invalid wishlist data" });
-    }
-
-    // Optional: Check if already exists
-    const exists = await userCollection.findOne({ hotelId: item.hotelId, email: item.email });
-    if (exists) {
-        return res.status(200).send({ message: "Already in wishlist" });
-    }
-
-    const result = await userCollection.insertOne(item);
-    res.status(200).send(result);
-});
 
 
         // (Optional) GET route: Fetch all favorites
