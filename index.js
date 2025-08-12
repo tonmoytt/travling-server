@@ -1,183 +1,250 @@
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+require('dotenv').config();
 const express = require('express');
-const app = express();
 const cors = require('cors');
-const dotenv = require('dotenv').config();
-const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
-const port = 5000;
+const jwt = require('jsonwebtoken');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
-// middleware 
-app.use(cors({
-    origin: [
-        'https://travling-clint-site.vercel.app',
-        // https://travling-server-site.vercel.app
-        'http://localhost:5173'
-    ],
-    credentials: true // এটা দিতে হবে কুকি পাঠানোর জন্য
-}));
+const app = express();
+const PORT = process.env.PORT || 5000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Basic env checks
+if (!process.env.DB_USER || !process.env.DB_PASS || !process.env.JWT_SECRET) {
+  console.error('❌ Missing required environment variables. Check DB_USER, DB_PASS, JWT_SECRET in .env');
+  process.exit(1);
+}
+
+// MongoDB URI (encode credentials)
+const DB_USER = encodeURIComponent(process.env.DB_USER);
+const DB_PASS = encodeURIComponent(process.env.DB_PASS);
+const DB_NAME = process.env.DB_NAME || 'Travling-Hotel';
+const uri = `mongodb+srv://${DB_USER}:${DB_PASS}@cluster0.jfgqsm5.mongodb.net/${DB_NAME}?retryWrites=true&w=majority&appName=Cluster0`;
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+});
+
+// Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// MongoDB URI
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_USER_PASSWORD}@cluster0.jfgqsm5.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// CORS config from env
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',').map(s => s.trim());
 
-// MongoClient setup
-const client = new MongoClient(uri, {
-    serverApi: {
-        version: ServerApiVersion.v1,
-        strict: true,
-        deprecationErrors: true,
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true); // allow curl/postman/no origin
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS policy: Origin not allowed'), false);
+  },
+  credentials: true
+}));
+
+// Cookie options helper
+function cookieOptions() {
+  // In production, set secure: true and sameSite: 'None'
+  const isProd = NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'None' : 'Lax',
+    // maxAge: 1000 * 60 * 60 * 24 * 30, // optional: 30 days
+  };
+}
+
+// JWT verify middleware
+function verifyJWT(req, res, next) {
+  const token = req.cookies?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.split(' ')[1] : null);
+  if (!token) return res.status(401).json({ message: 'Unauthorized: No token provided' });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(403).json({ message: 'Forbidden: Invalid or expired token' });
     }
+    req.user = decoded;
+    next();
+  });
+}
+
+// Main async function
+async function run() {
+  try {
+    await client.connect();
+    const db = client.db(DB_NAME);
+    const favoriteCollection = db.collection('Favorite');
+    const usersCollection = db.collection('users');
+
+    app.get('/', (req, res) => res.send('Hello World — Travling warp!'));
+
+    // Create or update user + set JWT cookie
+    app.post('/users', async (req, res) => {
+      try {
+        const user = req.body;
+        if (!user?.email) return res.status(400).json({ message: 'Email is required' });
+
+        const email = user.email.toLowerCase();
+        const filter = { email };
+
+        // Remove createdAt from user if exists to avoid conflict
+        const { createdAt, ...restUser } = user;
+
+        const update = {
+          $set: { ...restUser, email, updatedAt: new Date() },
+          $setOnInsert: { createdAt: new Date() }
+        };
+        const options = { upsert: true };
+
+        const result = await usersCollection.updateOne(filter, update, options);
+
+        const token = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '365d' });
+
+        res.cookie('token', token, cookieOptions()).status(200).json({ success: true, upsertedId: result.upsertedId || null });
+      } catch (err) {
+        console.error('POST /users error:', err);
+        res.status(500).json({ message: 'Server error creating/updating user' });
+      }
+    });
+
+    // Create/refresh short token endpoint
+    app.post('/jwt', async (req, res) => {
+      try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ message: 'Email required' });
+
+        const user = await usersCollection.findOne({ email: email.toLowerCase() });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET, { expiresIn: '200h' });
+        res.cookie('token', token, cookieOptions()).status(200).json({ success: true });
+      } catch (err) {
+        console.error('POST /jwt error:', err);
+        res.status(500).json({ message: 'Could not create token' });
+      }
+    });
+
+    // Logout route
+    app.post('/logout', (req, res) => {
+      res.clearCookie('token', cookieOptions());
+      res.status(200).json({ success: true, message: 'Logged out successfully' });
+    });
+
+    // Wishlist routes (protected)
+    app.post('/wishlist', verifyJWT, async (req, res) => {
+      try {
+        const item = req.body;
+        if (!item || !item.id) return res.status(400).json({ message: 'Invalid wishlist data: missing id' });
+
+        const userEmail = req.user?.email;
+        if (!userEmail) return res.status(403).json({ message: 'Forbidden: user email missing in token' });
+
+        item.email = userEmail;
+
+        const exists = await favoriteCollection.findOne({ id: item.id, email: userEmail });
+        if (exists) return res.status(409).json({ message: 'Item already added to wishlist' });
+
+        const result = await favoriteCollection.insertOne({ ...item, createdAt: new Date() });
+        res.status(201).json({ success: true, insertedId: result.insertedId });
+      } catch (err) {
+        console.error('POST /wishlist error:', err);
+        res.status(500).json({ message: 'Server error adding to wishlist' });
+      }
+    });
+
+    app.post('/wishlist-recommend', verifyJWT, async (req, res) => {
+      try {
+        const item = req.body;
+        if (!item || !item.hotelId || !item.name) return res.status(400).json({ message: 'Invalid data' });
+
+        const userEmail = req.user?.email;
+        if (!userEmail) return res.status(403).json({ message: 'Forbidden: user email missing in token' });
+
+        item.email = userEmail;
+
+        const exists = await favoriteCollection.findOne({ hotelId: item.hotelId, email: userEmail });
+        if (exists) return res.status(200).json({ message: 'Already in wishlist' });
+
+        const result = await favoriteCollection.insertOne({ ...item, createdAt: new Date() });
+        res.status(201).json({ success: true, insertedId: result.insertedId });
+      } catch (err) {
+        console.error('POST /wishlist-recommend error:', err);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+    app.get('/wishlist', verifyJWT, async (req, res) => {
+      try {
+        const userEmail = req.user?.email;
+        if (!userEmail) return res.status(403).json({ message: 'Forbidden: user email missing in token' });
+
+        const items = await favoriteCollection.find({ email: userEmail }).toArray();
+        res.status(200).json(items);
+      } catch (err) {
+        console.error('GET /wishlist error:', err);
+        res.status(500).json({ message: 'Server error fetching wishlist' });
+      }
+    });
+
+  app.delete('/wishlist/:id', verifyJWT, async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid id' });
+    }
+
+    const userEmail = req.user?.email;
+    if (!userEmail) {
+      return res.status(403).json({ message: 'Forbidden: user email missing in token' });
+    }
+
+    const query = { _id: new ObjectId(id), email: userEmail };
+    const result = await favoriteCollection.deleteOne(query);
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Not found or not authorized to delete' });
+    }
+
+    // deletedCount সহ response পাঠানো
+    res.status(200).json({ success: true, deletedCount: result.deletedCount });
+  } catch (err) {
+    console.error('DELETE /wishlist/:id error:', err);
+    res.status(500).json({ message: 'Server error deleting wishlist item' });
+  }
 });
 
-// JWT verification middleware
-function verifyJWT(req, res, next) {
-    const token = req.cookies.token;
-    if (!token) {
-        return res.status(401).send({ message: "Unauthorized: No token provided" });
-    }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-        if (err) {
-            return res.status(403).send({ message: "Forbidden: Invalid token" });
-        }
-        req.user = decoded; // ডিকোড করা ইউজার ডেটা মডিউলে রেখে দাও
-        next();
-    });
+    // Ping DB to confirm connection
+    await client.db('admin').command({ ping: 1 });
+    console.log('✅ Connected to MongoDB & routes are set.');
+  } catch (err) {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  }
 }
 
-async function run() {
-    try {
-        await client.connect();
-        const userCollection = client.db('Travling-Hotel').collection('Favorite');
-        const usersCollection2 = client.db('Travling-Hotel').collection('users');
+run().catch(err => {
+  console.error('Run error:', err);
+  process.exit(1);
+});
 
-        // POST route: Save new user & create JWT
-        app.post('/users', async (req, res) => {
-            const user = req.body;
-
-            // Check if user already exists
-            const existingUser = await usersCollection2.findOne({ email: user.email });
-            if (existingUser) {
-                return res.status(200).send({ message: "User already exists" });
-            }
-
-            // Save new user to DB
-            const result = await usersCollection2.insertOne(user);
-
-            // Create JWT token
-            const token = jwt.sign({ email: user.email }, process.env.JWT_SECRET, { expiresIn: '365d' });
-
-            // Send token as cookie
-            res.cookie('token', token, {
-                httpOnly: true,
-                secure: false, // production এ true দিতে হবে (HTTPS হলে)
-                sameSite: 'Lax'
-            }).send({ success: true, insertedId: result.insertedId });
-        });
-
-        // POST route: Add to Favorite (protected route)
-        app.post('/wishlist', verifyJWT, async (req, res) => {
-            const favoriteItem = req.body;
-
-            if (!favoriteItem || !favoriteItem.id || !favoriteItem.email) {
-                return res.status(400).send({ message: "Invalid wishlist data" });
-            }
-
-            try {
-                // Check if the item is already in the wishlist for this user
-                const exists = await userCollection.findOne({
-                    id: favoriteItem.id,
-                    email: favoriteItem.email
-                });
-
-                if (exists) {
-                    return res.status(400).send({ message: "Item already added to wishlist" });
-                }
-
-                // If not exists, insert the new item
-                const result = await userCollection.insertOne(favoriteItem);
-                res.status(200).send(result);
-            } catch (error) {
-                console.error('Wishlist insert error:', error);
-                res.status(500).send({ message: "Server error" });
-            }
-        });
-
-        // POST route: Add to wishlist-recommend (protected route)
-        app.post('/wishlist-recommend', verifyJWT, async (req, res) => {
-            const item = req.body;
-
-            // Basic validation
-            if (!item || !item.hotelId || !item.name || !item.email) {
-                return res.status(400).send({ message: "Invalid wishlist data" });
-            }
-
-            // Optional: Check if already exists
-            const exists = await userCollection.findOne({ hotelId: item.hotelId, email: item.email });
-            if (exists) {
-                return res.status(200).send({ message: "Already in wishlist" });
-            }
-
-            const result = await userCollection.insertOne(item);
-            res.status(200).send(result);
-        });
-
-        // GET route: Fetch all favorites (protected route)
-        app.get('/wishlist', verifyJWT, async (req, res) => {
-            const result = await userCollection.find().toArray();
-            res.send(result);
-        });
-
-        // DELETE wishlist item (protected route)
-        app.delete('/wishlist/:id', verifyJWT, async (req, res) => {
-            const id = req.params.id;
-            const query = { _id: new ObjectId(id) };
-            const result = await userCollection.deleteOne(query);
-            res.send(result);
-        });
-
-        // Jwt token route (Create/refresh token)
-        app.post('/jwt', (req, res) => {
-            const user = req.body; // ফ্রন্টএন্ড থেকে আসা ইউজার অবজেক্ট
-
-            const token = jwt.sign(user, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-            res.cookie('token', token, {
-                httpOnly: true,
-                secure: false, // HTTPS হলে true
-                sameSite: 'Lax'
-            }).send({ success: true });
-        });
-
-        // logout
-        app.post('/logout', (req, res) => {
-            res.clearCookie('token', {
-                httpOnly: true,
-                secure: false, // production এ true
-                sameSite: 'Lax'
-            });
-            res.send({ success: true, message: 'Logged out successfully' });
-        });
-
-
-        // Test MongoDB connection
-        await client.db("admin").command({ ping: 1 });
-        console.log("✅ Connected to MongoDB!");
-
-    } catch (err) {
-        console.error("MongoDB connection error:", err);
-    }
-}
-run().catch(console.dir);
-
-// Base route
-app.get('/', (req, res) => {
-    res.send('Hello World, I am from Travling warp!');
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('SIGINT received. Closing MongoDB client...');
+  try {
+    await client.close();
+    console.log('MongoDB client closed.');
+    process.exit(0);
+  } catch (err) {
+    console.error('Error closing MongoDB client:', err);
+    process.exit(1);
+  }
 });
 
 // Start server
-app.listen(port, () => {
-    console.log(`✅ Server running on port ${port}`);
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT} (${NODE_ENV})`);
 });
